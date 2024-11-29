@@ -3,7 +3,11 @@ use std::cell::RefCell;
 use anyhow::Result;
 
 use arboard::Clipboard;
-use jaq_interpret::{Ctx, FilterT, ParseCtx, RcIter, Val};
+use jaq_core::{
+    load::{Arena, File, Loader},
+    Compiler, Ctx, Filter, Native, RcIter,
+};
+use jaq_json::Val;
 
 use promkit::{
     crossterm::{
@@ -29,26 +33,15 @@ fn run_jaq(
     query: &str,
     json_stream: Vec<serde_json::Value>,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
+    let filter = parse(query)?;
+
     let mut ret = Vec::<serde_json::Value>::new();
 
     for input in json_stream {
-        let mut ctx = ParseCtx::new(Vec::new());
-        ctx.insert_natives(jaq_core::core());
-        ctx.insert_defs(jaq_std::std());
+        let inputs = RcIter::new(Box::new(core::iter::empty()));
 
-        let (f, errs) = jaq_parse::parse(query, jaq_parse::main());
-        if !errs.is_empty() {
-            let error_message = errs
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(anyhow::anyhow!(error_message));
-        }
-
-        let f = ctx.compile(f.unwrap());
-        let inputs = RcIter::new(core::iter::empty());
-        let mut out = f.run((Ctx::new([], &inputs), Val::from(input)));
+        let context = Ctx::new([], &inputs);
+        let mut out = filter.run((context, Val::from(input)));
 
         while let Some(Ok(val)) = out.next() {
             ret.push(val.into());
@@ -56,6 +49,21 @@ fn run_jaq(
     }
 
     Ok(ret)
+}
+
+fn parse(query: &str) -> anyhow::Result<Filter<Native<Val>>> {
+    let arena = Arena::default();
+    // Add the standard library from `jaq_std` and `jaq_json` before compiling query
+    let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
+    // Mock that the query stems from a file, even though it is all in-memory
+    let file = File {
+        path: (),
+        code: query,
+    };
+    let modules = loader.load(&arena, file).unwrap();
+    let compiler = Compiler::default().with_funs(jaq_std::funs().chain(jaq_json::funs()));
+    let filter = compiler.compile(modules).unwrap();
+    Ok(filter)
 }
 
 pub struct JsonTheme {
